@@ -18,8 +18,10 @@
 
 import errno
 import fcntl
+import os
 import select
 import shlex
+import signal
 import socket
 import socketserver
 import struct
@@ -58,7 +60,8 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         proxy = socket.create_server(("127.0.0.1", 0), reuse_port=True)
         proxy.setblocking(False)
         PHOST, PPORT = proxy.getsockname()
-        print(f"(+) [#{self.session}] Remote : {self.client_address} -> nc {PHOST} {PPORT}")
+        print(f"(+) [#{self.session}] Remote : {self.client_address}")
+        print(f"(+) [#{self.session}] Proxy  : nc {PHOST} {PPORT}")
 
         #
         # Main proxy loop.
@@ -68,7 +71,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         remote, local = self.request, None
         remote_off, local_off = False, False
         check_read = [remote, proxy]
-        while remote:
+        while True:
             #
             # Read data and accept connections.
             #
@@ -77,7 +80,8 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                 local, local_address = proxy.accept()
                 check_read.append(local)
                 check_read.remove(proxy)
-                print(f"(>) [#{self.session}] Local  : {local_address}")
+                local.sendall(f"\n(+) Session #{self.session} : {self.client_address}\n\n".encode())
+                print(f"(+) [#{self.session}] Local  : {local_address}")
             if remote in can_read:
                 data = remote.recv(4096)
                 if not data:
@@ -123,8 +127,12 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                 remote = None
                 remote_off = False
                 print(f"(!) [#{self.session}] Remote : disconnected")
-            if not (remote or local or remote_to_local or local_to_remote):
-                print(f"(!) [#{self.session}] Session closed")
+                if local_to_remote:
+                    print(f"(!) [#{self.session}] {len(local_to_remote)} bytes not sent to remote")
+                if remote_to_local:
+                    print(f"(!) [#{self.session}] {len(remote_to_local)} bytes not read by local")
+            if not (remote or local or remote_to_local):
+                print(f"(!) [#{self.session}] session closed")
                 break
 
         proxy.close()
@@ -143,19 +151,26 @@ def main():
     listener = MainServer((LHOST, LPORT), ProxyHandler)
     lthread = threading.Thread(target=listener.serve_forever)
     lthread.start()
-    CONFIRMED = False
-    while True:
-        try:
-            lthread.join() # Never happens.
-        except KeyboardInterrupt:
+
+    def handler(signum, frame):
+        if signum == signal.SIGINT:
             print("\r", end="") # Stop ^C from popping up in terminal.
-            if not CONFIRMED and SESSIONS:
-                print("(>) There are still open sessions, press Ctrl+C again to force quit")
-                CONFIRMED = True
-                continue
+            if SESSIONS:
+                print(f"(>) There are still open sessions, please kill me : {os.getpid()}")
             else:
                 print("(>) Keyboard interrupt received, exiting...")
-                break
+                raise KeyboardInterrupt
+        if signum == signal.SIGTERM:
+            print("(!) Terminated, exiting...")
+            raise SystemExit
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+
+    while True:
+        try:
+            lthread.join()  # Blocks infinitely.
+        except (KeyboardInterrupt, SystemExit):
+            break
         finally:
             listener.shutdown()
             listener.server_close()
