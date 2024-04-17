@@ -13,11 +13,8 @@
 #
 
 import asyncio
-import errno
 import fcntl
 import os
-import select
-import shlex
 import signal
 import socket
 import socketserver
