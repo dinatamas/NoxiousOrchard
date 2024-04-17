@@ -11,11 +11,8 @@
 #   - MainServer can continue listening on same port.
 #   - ProxyHandler keeps remote open if local disconnects.
 #
-# Tasks:
-#   - Use async for socket operations in ProxyHandler.
-#   - Improve error handling (not all cases caught).
-#
 
+import asyncio
 import errno
 import fcntl
 import os
@@ -54,88 +51,53 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         SESSIONS -= 1
 
     def handle(self):
-        #
-        # Initialize proxy.
-        #
-        proxy = socket.create_server(("127.0.0.1", 0), reuse_port=True)
-        proxy.setblocking(False)
-        PHOST, PPORT = proxy.getsockname()
+        asyncio.run(self.handle_async())
+
+    async def handle_async(self):
         print(f"(+) [#{self.session}] Remote : {self.client_address}")
+        self.loop = asyncio.get_event_loop()
+        self.remote = self.request
+        self.remote.setblocking(False)
+        self.proxy = socket.create_server(("127.0.0.1", 0), reuse_port=True)
+        self.proxy.setblocking(False)
+        PHOST, PPORT = self.proxy.getsockname()
         print(f"(+) [#{self.session}] Proxy  : nc {PHOST} {PPORT}")
 
-        #
-        # Main proxy loop.
-        #
-        remote_to_local = b""
-        local_to_remote = b""
-        remote, local = self.request, None
-        remote_off, local_off = False, False
-        check_read = [remote, proxy]
+        self.local_buffer, self.remote_buffer = socket.socketpair()
+        self.local_buffer.setblocking(False)
+        self.remote_buffer.setblocking(False)
+        task_local = asyncio.ensure_future(self.handle_local())
+        task_remote = asyncio.ensure_future(self.handle_remote())
+        await asyncio.gather(task_remote)
+        task_local.cancel()
+        print(f"(-) [#{self.session}] session closed")
+        # Todo: Do not cancel task_local until all buffered data is read.
+
+    async def handle_local(self):
         while True:
-            #
-            # Read data and accept connections.
-            #
-            can_read, _, _ = select.select(check_read, [], [])
-            if proxy in can_read:
-                local, local_address = proxy.accept()
-                check_read.append(local)
-                check_read.remove(proxy)
-                local.sendall(f"\n(+) Session #{self.session} : {self.client_address}\n\n".encode())
-                print(f"(+) [#{self.session}] Local  : {local_address}")
-            if remote in can_read:
-                data = remote.recv(4096)
-                if not data:
-                    remote_off = True
-                else:
-                    remote_to_local += data
-            if local in can_read:
-                data = local.recv(4096)
-                if not data:
-                    local_off = True
-                else:
-                    local_to_remote += data
+            self.local, local_address = await self.loop.sock_accept(self.proxy)
+            self.local.setblocking(False)
+            print(f"(+) [#{self.session}] Local  : {local_address}")
+            task_read = asyncio.ensure_future(self.sock2sock(self.local, self.local_buffer))
+            task_write = asyncio.ensure_future(self.sock2sock(self.local_buffer, self.local))
+            await asyncio.gather(task_read)
+            task_write.cancel()
+            print(f"(!) [#{self.session}] Local : disconnected")
 
-            #
-            # Attempt to write buffered data.
-            #
-            if remote and local_to_remote:
-                try:
-                    remote.sendall(local_to_remote)
-                    local_to_remote = b""
-                except:
-                    remote_off = True
-            if local and remote_to_local:
-                try:
-                    local.sendall(remote_to_local)
-                    remote_to_local = b""
-                except:
-                    local_off = True
+    async def handle_remote(self):
+        task_read = asyncio.ensure_future(self.sock2sock(self.remote, self.remote_buffer))
+        task_write = asyncio.ensure_future(self.sock2sock(self.remote_buffer, self.remote))
+        await asyncio.gather(task_read)
+        task_write.cancel()
+        print(f"(!) [#{self.session}] Remote : disconnected")
 
-            #
-            # Handle closed connections.
-            #
-            if local_off:
-                check_read.remove(local)
-                check_read.append(proxy)
-                local.close()
-                local = None
-                local_off = False
-                print(f"(!) [#{self.session}] Local  : disconnected")
-            if remote_off:
-                check_read.remove(remote)
-                remote.close()
-                remote = None
-                remote_off = False
-                print(f"(!) [#{self.session}] Remote : disconnected")
-                if local_to_remote:
-                    print(f"(!) [#{self.session}] {len(local_to_remote)} bytes not sent to remote")
-                if remote_to_local:
-                    print(f"(!) [#{self.session}] {len(remote_to_local)} bytes not read by local")
-            if not (remote or local or remote_to_local):
-                print(f"(!) [#{self.session}] session closed")
+    async def sock2sock(self, src, dst):
+        while True:
+            data = await self.loop.sock_recv(src, 4096)
+            if not data:
                 break
-
-        proxy.close()
+            await self.loop.sock_sendall(dst, data)
+            # Todo: Error handling for read-write operations.
 
 
 def main():
@@ -154,7 +116,7 @@ def main():
 
     def handler(signum, frame):
         if signum == signal.SIGINT:
-            print("\r", end="") # Stop ^C from popping up in terminal.
+            print("\r", end="")  # Stop ^C from popping up in terminal.
             if SESSIONS:
                 print(f"(>) There are still open sessions, please kill me : {os.getpid()}")
             else:
@@ -168,7 +130,7 @@ def main():
 
     while True:
         try:
-            lthread.join()  # Blocks infinitely.
+            lthread.join()  # Blocks ad infinitum.
         except (KeyboardInterrupt, SystemExit):
             break
         finally:
