@@ -77,6 +77,8 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             task_read = asyncio.ensure_future(self.sock2sock(self.local, self.local_buffer))
             task_write = asyncio.ensure_future(self.sock2sock(self.local_buffer, self.local))
             done, _ = await asyncio.wait([task_read, task_write], return_when=asyncio.FIRST_COMPLETED)
+            self.local.close()
+            self.local = None
             if task_write in done:
                 # remote_buffer closed -> no reconnect
                 task_read.cancel()
@@ -85,8 +87,6 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                 # local closed -> allow reconnect
                 task_write.cancel()
             print(f"[-] (#{self.session}) local  : disconnected")
-            self.local.close()
-            self.local = None
         self.local_buffer.close()
         self.local_buffer = None
 
