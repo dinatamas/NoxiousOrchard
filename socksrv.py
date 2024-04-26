@@ -8,9 +8,19 @@
 #   4. ProxyHandler transfers between local and remote clients.
 #
 # Why?
-#   - MainServer can continue listening on same port.
+#   - MainServer can continue listening on the same port.
 #   - ProxyHandler keeps remote open if local disconnects.
 #
+
+"""
+Behavior at local / remote client disconnects:
+    (1) R on, R send, R off -> L on, L read, L auto-off
+    (2) R on, R send, L on -> L read, L <-> R works
+    (3) L <-> R works, L off, R off -> L on, L read (final EOF from R), L auto-off
+    (4) L <-> R works, R off -> L auto-off (no more data to read from R)
+    (5) L <-> R works, L off, R send -> L on, L read, L <-> R works
+    (6) L <-> R works, L off, R send, R off -> L on, L read, L auto-off
+"""
 
 import asyncio
 import fcntl
@@ -87,8 +97,9 @@ class ProxyHandler(socketserver.BaseRequestHandler):
                 # local closed -> allow reconnect
                 task_write.cancel()
             print(f"[-] (#{self.session}) local  : disconnected")
-        self.local_buffer.close()
-        self.local_buffer = None
+        if self.local_buffer:
+            self.local_buffer.close()
+            self.local_buffer = None
 
     async def handle_remote(self):
         task_read = asyncio.ensure_future(self.sock2sock(self.remote, self.remote_buffer))
@@ -96,10 +107,12 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         await asyncio.gather(task_read)  # remote closed
         task_write.cancel()
         print(f"[-] (#{self.session}) remote : disconnected")
-        self.remote.close()
-        self.remote = None
-        self.remote_buffer.close()
-        self.remote_buffer = None
+        if self.remote:
+            self.remote.close()
+            self.remote = None
+        if self.remote_buffer:
+            self.remote_buffer.close()
+            self.remote_buffer = None
 
     async def sock2sock(self, src, dst):
         while True:

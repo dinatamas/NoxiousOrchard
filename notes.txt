@@ -1,7 +1,0 @@
-Add automated test cases for verification of local / remote disconnects:
-  (1) R on, R send, R off -> L on, L read, L auto-off
-  (2) R on, R send, L on -> L read, L <-> R works
-  (3) L <-> R works, L off, R off -> L on, L read (final EOF from R), L auto-off
-  (4) L <-> R works, R off -> L auto-off (no more data to read from R)
-  (5) L <-> R works, L off, R send -> L on, L read, L <-> R works
-  (6) L <-> R works, L off, R send, R off -> L on, L read, L auto-off
