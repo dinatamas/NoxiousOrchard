@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 #
-# Stupid simple multiplexer socket server.
+# Stupid simple sessioned socket server.
 #   1. Remote reverse shell connects to MainServer.
 #   2. MainServer opens local ProxyHandler.
 #   3. Local client connects to ProxyHandler.
@@ -16,33 +16,25 @@
 Behavior at local / remote client disconnects:
     (1) R on, R send, R off -> L on, L read, L auto-off
     (2) R on, R send, L on -> L read, L <-> R works
-    (3) L <-> R works, L off, R off -> L on, L read (final EOF from R), L auto-off
+    (3) L <-> R works, L off, R off -> L auto-off (do not read EOF from R)
     (4) L <-> R works, R off -> L auto-off (no more data to read from R)
     (5) L <-> R works, L off, R send -> L on, L read, L <-> R works
     (6) L <-> R works, L off, R send, R off -> L on, L read, L auto-off
 """
 
 import asyncio
-import fcntl
 import os
 import signal
 import socket
 import socketserver
-import struct
 import threading
 
 
-LIFNAME = "lo"
-LPORT = 443
+LHOST = "127.0.0.1"
+LPORT = 33443
 
 SESSION = 1
 SESSIONS = 0
-
-
-class MainServer(socketserver.ThreadingTCPServer):
-
-    allow_reuse_address = True
-    daemon_threads = True
 
 
 class ProxyHandler(socketserver.BaseRequestHandler):
@@ -61,32 +53,50 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         asyncio.run(self.handle_async())
 
     async def handle_async(self):
-        print(f"[+] (#{self.session}) remote : {self.client_address}")
+        print(f"[+] (#{self.session}) remote: {self.client_address}")
         self.loop = asyncio.get_event_loop()
         self.remote = self.request
         self.remote.setblocking(False)
         self.proxy = socket.create_server(("127.0.0.1", 0), reuse_port=True)
         self.proxy.setblocking(False)
         PHOST, PPORT = self.proxy.getsockname()
-        print(f"[+] (#{self.session}) proxy  : nc {PHOST} {PPORT}")
+        print(f"[+] (#{self.session}) proxy: nc {PHOST} {PPORT}")
 
         self.local_buffer, self.remote_buffer = socket.socketpair()
         self.local_buffer.setblocking(False)
         self.remote_buffer.setblocking(False)
+        self.accept_task = None
         task_local = asyncio.ensure_future(self.handle_local())
         task_remote = asyncio.ensure_future(self.handle_remote())
-        await asyncio.gather(task_local, task_remote)
-        print(f"[-] (#{self.session}) session closed")
+        await asyncio.gather(task_remote)
+        try:
+            leftover = self.local_buffer.recv(4096, socket.MSG_PEEK)
+        except:
+            leftover = None
+        if leftover:
+            print(f"[!] (#{self.session}) session: unread local data")
+        else:
+            if self.accept_task:
+                self.accept_task.cancel()
+        await asyncio.gather(task_local)
+        print(f"[-] (#{self.session}) session: closed")
 
     async def handle_local(self):
         while True:
-            self.local, local_address = await self.loop.sock_accept(self.proxy)
+            try:
+                # Waits until connection is received or cancelled.
+                self.accept_task = self.loop.sock_accept(self.proxy)
+                self.local, local_address = await self.accept_task
+            except asyncio.CancelledError:
+                break
+            self.accept_task = None
             self.local.setblocking(False)
-            print(f"[+] (#{self.session}) local  : {local_address}")
-            self.local.sendall(f"\n[+] (#{self.session}) peer : {self.client_address}\n\n".encode())
+            print(f"[+] (#{self.session}) local: {local_address}")
+            self.local.sendall(f"\n[+] (#{self.session}) peer: {self.client_address}\n\n".encode())
             task_read = asyncio.ensure_future(self.sock2sock(self.local, self.local_buffer))
             task_write = asyncio.ensure_future(self.sock2sock(self.local_buffer, self.local))
             done, _ = await asyncio.wait([task_read, task_write], return_when=asyncio.FIRST_COMPLETED)
+            print(f"[-] (#{self.session}) local: disconnected")
             self.local.close()
             self.local = None
             if task_write in done:
@@ -96,7 +106,6 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             if task_read in done:
                 # local closed -> allow reconnect
                 task_write.cancel()
-            print(f"[-] (#{self.session}) local  : disconnected")
         if self.local_buffer:
             self.local_buffer.close()
             self.local_buffer = None
@@ -106,7 +115,7 @@ class ProxyHandler(socketserver.BaseRequestHandler):
         task_write = asyncio.ensure_future(self.sock2sock(self.remote_buffer, self.remote))
         await asyncio.gather(task_read)  # remote closed
         task_write.cancel()
-        print(f"[-] (#{self.session}) remote : disconnected")
+        print(f"[-] (#{self.session}) remote: disconnected")
         if self.remote:
             self.remote.close()
             self.remote = None
@@ -124,13 +133,21 @@ class ProxyHandler(socketserver.BaseRequestHandler):
             if not data:
                 break  # src closed for read
 
+
+class MainServer(socketserver.ThreadingTCPServer):
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+
 def main():
+    # Todo: Commented out until cross-platform implementation.
+    # with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #     packed = struct.pack("256s", LIFNAME.encode())
+    #     LHOST = fcntl.ioctl(s.fileno(), 0x8915, packed)  # SIOCGIFADDR
+    #     LHOST = socket.inet_ntoa(LHOST[20:24])
     print()
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        packed = struct.pack("256s", LIFNAME.encode())
-        LHOST = fcntl.ioctl(s.fileno(), 0x8915, packed)  # SIOCGIFADDR
-        LHOST = socket.inet_ntoa(LHOST[20:24])
-    print(f"[+] LHOST = {LHOST} ({LIFNAME})")
+    print(f"[+] LHOST = {LHOST}")
     print(f"[+] LPORT = {LPORT}")
     print()
 
@@ -138,28 +155,26 @@ def main():
     lthread = threading.Thread(target=listener.serve_forever)
     lthread.start()
 
-    def handler(signum, frame):
-        if signum == signal.SIGINT:
-            print("\r", end="")  # Stop ^C from popping up in terminal.
-            if SESSIONS:
-                print(f"[!] There are open sessions, please kill me : {os.getpid()}")
-            else:
-                print("[!] Keyboard interrupt received, exiting...")
-                raise KeyboardInterrupt
-        if signum == signal.SIGTERM:
-            print("[!] Terminated, exiting...")
-            raise SystemExit
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
+    def sigint_handler(*_):
+        print("\r", end="")  # Stop ^C from popping up in terminal.
+        if SESSIONS:
+            print(f"[!] There are open sessions, please kill me: {os.getpid()}")
+        else:
+            print("[-] Interrupt received, exiting...")
+            raise KeyboardInterrupt
+    def sigterm_handler(*_):
+        print("[-] Terminated, exiting...")
+        raise SystemExit
+    signal.signal(signal.SIGINT, sigint_handler)
+    signal.signal(signal.SIGTERM, sigterm_handler)
 
-    while True:
-        try:
-            lthread.join()  # Blocks ad infinitum.
-        except (KeyboardInterrupt, SystemExit):
-            break
-        finally:
-            listener.shutdown()
-            listener.server_close()
+    try:
+        lthread.join()  # blocks ad infinitum
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        listener.shutdown()
+        listener.server_close()
 
 
 if __name__ == "__main__":
