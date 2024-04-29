@@ -70,6 +70,7 @@ func _main() int {
 }
 
 func gorecv(name string, fd io.Reader, send chan<- []byte) {
+  defer close(send)
   for {
     buf := make([]byte, 4096)
     n, err := fd.Read(buf)
@@ -77,7 +78,6 @@ func gorecv(name string, fd io.Reader, send chan<- []byte) {
       if err != io.EOF {
         log.Printf("gorecv %s: error %s", name, err)
       }
-      close(send)
       log.Printf("gorecv %s: finished", name)
       return
     }
