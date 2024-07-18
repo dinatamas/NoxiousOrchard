@@ -1,11 +1,11 @@
 package main
 
 import (
+  "bufio"
   "io"
   "log"
   "net"
   "os"
-  "sync"
   "time"
 )
 
@@ -15,7 +15,7 @@ const (
 )
 
 func main() {
-  // Todo: handle interrupts!
+  // Todo: Handle interrupts!
   os.Exit(_main())
 }
 
@@ -33,41 +33,41 @@ func _main() int {
       }
       defer conn.Close()
 
-      remote_buffer := make(chan []byte)
-      local_buffer := make(chan []byte)
+      connbuf := bufio.NewReader(conn)
 
-      var wg sync.WaitGroup
-
-      wg.Add(1)
-      go func() {
-        gorecv("remote", conn, remote_buffer)
-        wg.Done()
-      }()
-
-      wg.Add(1)
-      go func() {
-        gosend("remote", remote_buffer, os.Stdout)
-        wg.Done()
-      }()
-
-      wg.Add(1)
-      go func() {
-        gorecv("local", os.Stdin, local_buffer)
-        wg.Done()
-      }()
-
-      wg.Add(1)
-      go func() {
-        gosend("local", local_buffer, conn)
-        wg.Done()
-      }()
-
-      wg.Wait()
+      for alive {
+        // Todo: Handle LF and CRLF as well!
+        cmd, err := connbuf.ReadString('\n')
+        if err != nil {
+          if err != io.EOF {
+            log.Print("cmdloop error: ", err)
+          }
+          return
+        }
+        cmd = cmd[:len(cmd)-1]
+        log.Print("executing command: ", cmd)
+        if cmd == "kill" {
+          alive = false
+        }
+        // Todo: Placeholder for command parsing!
+        // Todo: Or: should I just use JSON?
+        // Todo: Or: should I use XML / ASN.1?
+        // Todo: Or: some sort of HTTP?
+        else {
+          log.Print("unknown command")
+        }
+      }
     }()
   }
 
   return 0
 }
+
+
+
+
+
+
 
 func gorecv(name string, fd io.Reader, send chan<- []byte) {
   defer close(send)

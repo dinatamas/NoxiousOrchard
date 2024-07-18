@@ -1,0 +1,265 @@
+
+
+#
+# - https://docs.python.org/3/library/contextlib.html#contextlib.ExitStack
+# - https://habr.com/en/articles/191786/
+# - https://pypi.org/project/pygolang/
+# - https://musings.yasyf.com/bringing-gos-defer-to-python/
+#
+# - https://viewsourcecode.org/snaptoken/kilo/02.enteringRawMode.html
+# - https://docs.python.org/3/library/ctypes.html
+# - https://docs.python.org/3/library/msvcrt.html
+# - https://docs.python.org/3/library/termios.html
+# - https://docs.python.org/3/library/tty.html
+# - https://gist.github.com/jtriley/1108174
+# - https://github.com/dinatamas/kilohex/blob/main/terminal/terminal_windows.go
+
+# TODO:
+# - incorporate BufferedSocket for json reading / sending
+# - create commands: session list, session join  + ~"message"
+# - auto-add commadns to help, etc.
+# - improve command handling (auto-arguments?)
+# - enter raw terminal mode and get raw input!
+# - introduce nice shell completion / history
+# - add multiple SESSION support to server!
+#
+# ~ fuzzbunch ~ kilohex
+
+
+
+
+feed(), take() : take RPCs
+RCP parse(), dump() : <-> dict? + string + bytes
+
+ACKs -> RPC
+ - feed() ACKs to unlock take()
+ - async execution : future should wait func and write into queue when needed
+   -> take() is also a local "notifier"
+ - feed() noACK should trigger take()
+   (and some sort of corrective action)
+
+
+
+feed()
+ - send the message read from the peer
+
+take()
+ - read the next message from Dispatch, that should be forwarder to peer
+
+Should these functions take parsed / dumped RPCs or simple RPCs?
+ - simple: we won't know if we want bytes, strings, etc...
+ - let's do all parsing / dumping on the final side!
+But then we will also need to handle the ACKs on the other side!
+
+Parsing an ACK should not simply discard it!
+Should ACKs also be RPCs?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+send ->
+recv <-
+
+these are async
+only sync part is between multiple sends
+
+send ->
+recv <- ack
+send ->
+recv <- ack
+
+sender can simply be a thread / future
+
+while True:
+  await read data for peer
+  send to peer
+  await ack
+
+recv can also be:
+
+while True:
+  await read data from peer
+  parse + dispatch
+  send ack
+
+callbacks (read, send)
+ - if we read -> other side won't know about it?
+
+or feed-take?
+ - these loops need to be on the other side...
+
+Do we need anything else than just read -> parse -> execute -> send?
+Maybe the other side doesn't even need to care about it...
+
+- priority / dequeue : buffer for sending data
+
+Or should this be like a task queue?
+Nah... async execution is good...
+
+
+
+
+
+https://rainer.gerhards.net/2008/04/on-unreliability-of-plain-tcp-syslog.html
+https://rainer.gerhards.net/2008/03/relp-reliable-event-logging-protocol.html
+https://rainer.gerhards.net/2008/05/why-you-cant-build-reliable-tcp.html
+
+feed() -> process received json string
+take() -> forward produced json string
+
+Begins async execution in background, provides async consumers.
+Provides immediate results (parsed objects).
+Not sure about feed() and take() ...
+ - feed() should immeditately return an ACK otherwise the other
+   side won't be able to send anything else...
+ - each side can consume until an ACK comes, just not send
+ - so the consumer-procuder multiplexing is a question...
+Should ACKs be returned by feed() or put into the queue for take()?
+
+ACKs should be returned as fast as possible!
+Otherwise the other side won't be able to serve new data.
+But since you will send something, you also won't be able
+to serve anything new...
+I'm just reinventing TCP at this point :D
+
+Request: future -> awaits the response from other side!
+Response: future -> awaits the response from our side!
+
+RPC: Add an extra ACKed attribute -> we know if we should resend!
+
+What if the ACK gets lost?
+
+ACK management:
+
+(1) A sends, B sends, B ACKs, A sends, A ACKs
+ - There is one send and one ACK each time.
+ - Peers wait for ACK before sending data.
+ - Do we send or ACK first? Together?
+ - ACKs may need to jump ahead in send queue...
+
+(2) Batched sends + ACKs
+ - ACKs are necessary for full batches
+ - Requires buffering: data is gathered async
+
+(3) ACK requests
+ - After sending data, the peer wants to know what was received.
+ - Explicitly states what should be ACKed.
+ - Needs: selective ACKs and resends.
+
+(4) ACK windows
+ - ~ batching but we send separately
+ - ~ requests but implicit limits
+
+TCP ACK windows don't wait for sending: they just resend!
+My protocol probably contains some level of "blocking".
+
+Idea: In-order delivery among peer messages?
+Timestamps in RPCs = we can order ACK(s) and send(s).
+If other data was created before our data -> ACK first.
+Otherwise we can just send more data before ACK.
+The other side will also be able to do this:
+Both sides will have a shared flow of RPCs and ACKs.
+But usually when data was sent: it was already processed,
+so knowing if it came before or after the data received
+is much less important...
+We should know if our data is before theirs:
+we must know the timestamp of the first message waiting
+to be sent over, so that the peer can decide to let it
+come over (by ACKing) or to send more data, until the
+situation flips!
+But what if we sent multiple? Then we need ACKs for all...
+We might need some batched ACKs / selective retransmits!
+
+But it's generally true that once something is in the send
+buffer, it won't be affected by anything in the receive
+buffer, simply because the application logic has lost
+control over it by emitting it.
+So maybe this timestamping is not important...
+
+Should Dispatcher allow sending data (buffering) even when
+there are outstanding ACKs that have not yet been received?
+- If yes: what if the peer goes down?
+  -> somehow propagate issues back
+- If no: the main app will have to block...
+  -> check writability
+
+Note: Execution should not halt when peer is not available
+or not connected! This is due to SocketBuffers... we will
+always be able to write to the socket -> do we really want
+to halt execution because of RPC?
+
+Probably: not. The application itself should halt while
+waiting for results, but should there be dependencies
+between sends?
+
+RPC: batches, but not sent as one batch :)
+These are "processing" batches -> the peers know that these
+messages belong together, but they are still sent as
+separate units... this is to reduce latency between
+generating data and sending it out -> even if the connection
+goes down, we don't want to loose data due to buffered
+messages not yet being sent out.
+
+Buffering / collection happens on the consumer side, instead
+of the producer to reduce latency, but ACKs should still
+consider these items as batches...
+ - this is mostly for consumer to know to wait for more data
+   or upcoming requests...
+
+Each RPC should have an ID for ACKs!
+
+Also see: reliable UDP -> very similar!
+
+=================================================
+
+Initial implementation:
+
+1. A : generate data -> send to B -> wait for ACK
+
+2. B : receive data
+  a. If B has data to send:
+    generate data (previously)
+    send to B
+  b. send ACK to B
+  c. wait for ACK
+
+3. A : receive data
+  a. If A has data to send:
+    generate data (previously)
+    send to A
+  b. send ACK to A
+  c. wait for ACK
+
+=================================================
+
+Main: reads some data from socket
+ -> feed() to Dispatcher
+ -> Dispatcher: parses -> ack, rpc
+ -> Dispatcher: calls proper function
+ -> Dispatcher: adds future to rpc
+ -> Dispatcher: returns ack, rpc
+Main: take() 
+
+=================================================
+
+Should reading and writing be on separate threads?
+Separate asyncio?
+
+feed() -> ack return -> might block / release writing!
+
+=================================================
+
+
